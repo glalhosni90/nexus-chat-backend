@@ -3,9 +3,9 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
-const db = require('../models/database');
 const auth = require('../middleware/auth');
+const { generateId, insertMessage } = require('../utils/db-helpers');
+const { emitToUser } = require('../utils/socket');
 
 // Create uploads directory
 const uploadDir = path.join(__dirname, '../uploads');
@@ -15,7 +15,7 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
-    cb(null, uuidv4() + ext);
+    cb(null, generateId() + ext);
   }
 });
 
@@ -38,26 +38,14 @@ router.post('/', auth, upload.single('file'), (req, res) => {
   const imageExts = /\.(jpg|jpeg|png|gif|webp)$/i;
   const type = imageExts.test(req.file.originalname) ? 'image' : 'file';
   const url = '/uploads/' + req.file.filename;
-  const msgId = uuidv4();
-  const now = new Date().toISOString();
 
-  db.prepare(`
-    INSERT INTO messages (id, from_user_id, to_user_id, content, type, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(msgId, req.user.id, toUserId, url, type, now);
+  const msg = insertMessage(req.user.id, toUserId, url, type);
 
-  // Emit to recipient via socket (handled in server.js via global io)
-  if (global.io) {
-    const { onlineUsers } = global;
-    const recipientSocket = onlineUsers?.get(toUserId);
-    if (recipientSocket) {
-      global.io.to(recipientSocket).emit('message:receive', {
-        id: msgId, fromUserId: req.user.id, toUserId, content: url, type, createdAt: now
-      });
-    }
-  }
+  emitToUser(toUserId, 'message:receive', {
+    id: msg.id, fromUserId: req.user.id, toUserId, content: url, type, createdAt: msg.createdAt
+  });
 
-  res.json({ url, type, id: msgId });
+  res.json({ url, type, id: msg.id });
 });
 
 module.exports = router;

@@ -4,6 +4,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const db = require('./models/database');
+const { insertMessage } = require('./utils/db-helpers');
+const { emitToUser } = require('./utils/socket');
 
 const authRoutes = require('./routes/auth');
 const friendRoutes = require('./routes/friends');
@@ -38,6 +40,14 @@ const onlineUsers = new Map();
 global.io = io;
 global.onlineUsers = onlineUsers; // userId -> socketId
 
+/**
+ * Forward a socket event from the current socket's user to a recipient.
+ * Attaches { fromUserId } automatically.
+ */
+function forwardToUser(socket, toUserId, event, extra = {}) {
+  return emitToUser(toUserId, event, { fromUserId: socket.userId, ...extra });
+}
+
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
@@ -45,7 +55,6 @@ io.on('connection', (socket) => {
   socket.on('user:online', (userId) => {
     onlineUsers.set(userId, socket.id);
     socket.userId = userId;
-    // Broadcast to all friends that this user is online
     io.emit('user:status', { userId, status: 'online' });
     console.log(`User ${userId} is online`);
   });
@@ -57,86 +66,48 @@ io.on('connection', (socket) => {
 
     if (!fromUserId) return;
 
-    // Save to DB
-    const stmt = db.prepare(`
-      INSERT INTO messages (id, from_user_id, to_user_id, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const msgId = require('uuid').v4();
-    const now = new Date().toISOString();
-    stmt.run(msgId, fromUserId, toUserId, message, now);
+    const msg = insertMessage(fromUserId, toUserId, message);
+    const msgObj = { id: msg.id, fromUserId, toUserId, content: message, createdAt: msg.createdAt };
 
-    const msgObj = { id: msgId, fromUserId, toUserId, content: message, createdAt: now };
-
-    // Send to recipient if online
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('message:receive', msgObj);
-    }
-
-    // Confirm to sender
+    emitToUser(toUserId, 'message:receive', msgObj);
     socket.emit('message:sent', { ...msgObj, tempId });
   });
 
   // Typing indicator
   socket.on('typing:start', ({ toUserId }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('typing:start', { fromUserId: socket.userId });
-    }
+    forwardToUser(socket, toUserId, 'typing:start');
   });
 
   socket.on('typing:stop', ({ toUserId }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('typing:stop', { fromUserId: socket.userId });
-    }
+    forwardToUser(socket, toUserId, 'typing:stop');
   });
 
   // WebRTC Signaling for voice calls
   socket.on('call:offer', ({ toUserId, offer }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('call:offer', { fromUserId: socket.userId, offer });
-    } else {
+    if (!forwardToUser(socket, toUserId, 'call:offer', { offer })) {
       socket.emit('call:unavailable', { toUserId });
     }
   });
 
   socket.on('call:answer', ({ toUserId, answer }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('call:answer', { fromUserId: socket.userId, answer });
-    }
+    forwardToUser(socket, toUserId, 'call:answer', { answer });
   });
 
   socket.on('call:ice-candidate', ({ toUserId, candidate }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('call:ice-candidate', { fromUserId: socket.userId, candidate });
-    }
+    forwardToUser(socket, toUserId, 'call:ice-candidate', { candidate });
   });
 
   socket.on('call:end', ({ toUserId }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('call:end', { fromUserId: socket.userId });
-    }
+    forwardToUser(socket, toUserId, 'call:end');
   });
 
   socket.on('call:reject', ({ toUserId }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('call:reject', { fromUserId: socket.userId });
-    }
+    forwardToUser(socket, toUserId, 'call:reject');
   });
 
   // Friend request notifications
   socket.on('friend:request:send', ({ toUserId }) => {
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('friend:request:incoming', { fromUserId: socket.userId });
-    }
+    forwardToUser(socket, toUserId, 'friend:request:incoming');
   });
 
   // Disconnect

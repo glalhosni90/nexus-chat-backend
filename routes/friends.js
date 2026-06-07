@@ -1,38 +1,35 @@
 const express = require('express');
 const router = express.Router();
-const { v4: uuidv4 } = require('uuid');
 const db = require('../models/database');
 const auth = require('../middleware/auth');
+const { generateId, now, findUserByUsername, findBidirectionalMatch } = require('../utils/db-helpers');
 
 // Send friend request
 router.post('/request', auth, (req, res) => {
   const { toUsername } = req.body;
   const fromUserId = req.user.id;
 
-  const toUser = db.prepare('SELECT id FROM users WHERE username = ?').get(toUsername.toLowerCase());
+  const toUser = findUserByUsername(toUsername, 'id');
   if (!toUser) return res.status(404).json({ error: 'User not found' });
   if (toUser.id === fromUserId) return res.status(400).json({ error: 'Cannot add yourself' });
 
   // Check if already friends
-  const alreadyFriends = db.prepare(`
-    SELECT id FROM friendships
-    WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)
-  `).get(fromUserId, toUser.id, toUser.id, fromUserId);
+  const alreadyFriends = findBidirectionalMatch(
+    'friendships', 'user1_id', 'user2_id', fromUserId, toUser.id
+  );
   if (alreadyFriends) return res.status(409).json({ error: 'Already friends' });
 
   // Check existing request
-  const existing = db.prepare(`
-    SELECT id, status FROM friend_requests
-    WHERE (from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)
-  `).get(fromUserId, toUser.id, toUser.id, fromUserId);
-
+  const existing = findBidirectionalMatch(
+    'friend_requests', 'from_user_id', 'to_user_id', fromUserId, toUser.id
+  );
   if (existing) return res.status(409).json({ error: 'Request already exists' });
 
-  const id = uuidv4();
+  const id = generateId();
   db.prepare(`
     INSERT INTO friend_requests (id, from_user_id, to_user_id, status, created_at)
     VALUES (?, ?, ?, 'pending', ?)
-  `).run(id, fromUserId, toUser.id, new Date().toISOString());
+  `).run(id, fromUserId, toUser.id, now());
 
   res.json({ success: true, requestId: id, toUserId: toUser.id });
 });
@@ -47,11 +44,11 @@ router.post('/accept/:requestId', auth, (req, res) => {
 
   db.prepare('UPDATE friend_requests SET status = ? WHERE id = ?').run('accepted', request.id);
 
-  const friendshipId = uuidv4();
+  const friendshipId = generateId();
   db.prepare(`
     INSERT INTO friendships (id, user1_id, user2_id, created_at)
     VALUES (?, ?, ?, ?)
-  `).run(friendshipId, request.from_user_id, request.to_user_id, new Date().toISOString());
+  `).run(friendshipId, request.from_user_id, request.to_user_id, now());
 
   res.json({ success: true });
 });
