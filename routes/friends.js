@@ -7,6 +7,9 @@ const auth = require('../middleware/auth');
 // Send friend request
 router.post('/request', auth, (req, res) => {
   const { toUsername } = req.body;
+  if (!toUsername || typeof toUsername !== 'string')
+    return res.status(400).json({ error: 'toUsername is required' });
+
   const fromUserId = req.user.id;
 
   const toUser = db.prepare('SELECT id FROM users WHERE username = ?').get(toUsername.toLowerCase());

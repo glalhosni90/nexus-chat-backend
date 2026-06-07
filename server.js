@@ -3,7 +3,11 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 const db = require('./models/database');
+const { getJwtSecret } = require('./middleware/auth');
 
 const authRoutes = require('./routes/auth');
 const friendRoutes = require('./routes/friends');
@@ -14,48 +18,76 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : [];
+
+const corsOptions = {
+  origin: allowedOrigins.length > 0
+    ? (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+          callback(null, true);
+        } else {
+          callback(new Error('Not allowed by CORS'));
+        }
+      }
+    : false,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+};
+
+const io = new Server(server, { cors: corsOptions });
+
+app.use(helmet());
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many requests, please try again later' },
 });
 
-app.use(cors());
-app.use(express.json());
-
 // Routes
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/friends', friendRoutes);
 app.use('/api/messages', messageRoutes);
 
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.1' }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/messages/upload', uploadRoutes);
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', require('./middleware/auth'), express.static(path.join(__dirname, 'uploads')));
 
 // Socket.io - Online users map
 const onlineUsers = new Map();
 global.io = io;
 global.onlineUsers = onlineUsers; // userId -> socketId
 
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+// Socket.io JWT authentication middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token;
+  if (!token) return next(new Error('Authentication required'));
+  try {
+    const decoded = jwt.verify(token, getJwtSecret());
+    socket.userId = decoded.id;
+    socket.username = decoded.username;
+    next();
+  } catch {
+    next(new Error('Invalid token'));
+  }
+});
 
-  // User comes online
-  socket.on('user:online', (userId) => {
-    onlineUsers.set(userId, socket.id);
-    socket.userId = userId;
-    // Broadcast to all friends that this user is online
-    io.emit('user:status', { userId, status: 'online' });
-    console.log(`User ${userId} is online`);
-  });
+io.on('connection', (socket) => {
+  // User automatically online on authenticated connection
+  onlineUsers.set(socket.userId, socket.id);
+  io.emit('user:status', { userId: socket.userId, status: 'online' });
 
   // Send message
   socket.on('message:send', (data) => {
+    if (!data || typeof data !== 'object') return;
     const { toUserId, message, tempId } = data;
     const fromUserId = socket.userId;
 
-    if (!fromUserId) return;
+    if (!fromUserId || !toUserId || !message) return;
+    if (typeof message !== 'string' || message.length > 5000) return;
 
     // Save to DB
     const stmt = db.prepare(`
