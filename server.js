@@ -33,6 +33,13 @@ app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.1' }));
 app.use('/api/messages/upload', uploadRoutes);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Global error handler
+app.use((err, req, res, _next) => {
+  console.error('Unhandled error:', err.message, err.stack);
+  const status = err.status || 500;
+  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+});
+
 // Socket.io - Online users map
 const onlineUsers = new Map();
 global.io = io;
@@ -52,41 +59,57 @@ io.on('connection', (socket) => {
 
   // Send message
   socket.on('message:send', (data) => {
-    const { toUserId, message, tempId } = data;
-    const fromUserId = socket.userId;
+    try {
+      const { toUserId, message, tempId } = data;
+      const fromUserId = socket.userId;
 
-    if (!fromUserId) return;
+      if (!fromUserId) {
+        socket.emit('message:error', { error: 'Not authenticated', tempId: data?.tempId });
+        return;
+      }
 
-    // Save to DB
-    const stmt = db.prepare(`
-      INSERT INTO messages (id, from_user_id, to_user_id, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const msgId = require('uuid').v4();
-    const now = new Date().toISOString();
-    stmt.run(msgId, fromUserId, toUserId, message, now);
+      if (!toUserId || !message) {
+        socket.emit('message:error', { error: 'Missing toUserId or message', tempId });
+        return;
+      }
 
-    const msgObj = { id: msgId, fromUserId, toUserId, content: message, createdAt: now };
+      const stmt = db.prepare(`
+        INSERT INTO messages (id, from_user_id, to_user_id, content, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const msgId = require('uuid').v4();
+      const now = new Date().toISOString();
+      stmt.run(msgId, fromUserId, toUserId, message, now);
 
-    // Send to recipient if online
-    const recipientSocket = onlineUsers.get(toUserId);
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('message:receive', msgObj);
+      const msgObj = { id: msgId, fromUserId, toUserId, content: message, createdAt: now };
+
+      // Send to recipient if online
+      const recipientSocket = onlineUsers.get(toUserId);
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('message:receive', msgObj);
+      }
+
+      // Confirm to sender
+      socket.emit('message:sent', { ...msgObj, tempId });
+    } catch (err) {
+      console.error('Error in message:send handler:', err.message);
+      socket.emit('message:error', { error: 'Failed to send message', tempId: data?.tempId });
     }
-
-    // Confirm to sender
-    socket.emit('message:sent', { ...msgObj, tempId });
   });
 
   // Typing indicator
-  socket.on('typing:start', ({ toUserId }) => {
+  socket.on('typing:start', (data) => {
+    const toUserId = data?.toUserId;
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('typing:start', { fromUserId: socket.userId });
     }
   });
 
-  socket.on('typing:stop', ({ toUserId }) => {
+  socket.on('typing:stop', (data) => {
+    const toUserId = data?.toUserId;
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('typing:stop', { fromUserId: socket.userId });
@@ -94,7 +117,9 @@ io.on('connection', (socket) => {
   });
 
   // WebRTC Signaling for voice calls
-  socket.on('call:offer', ({ toUserId, offer }) => {
+  socket.on('call:offer', (data) => {
+    const { toUserId, offer } = data || {};
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('call:offer', { fromUserId: socket.userId, offer });
@@ -103,28 +128,36 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('call:answer', ({ toUserId, answer }) => {
+  socket.on('call:answer', (data) => {
+    const { toUserId, answer } = data || {};
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('call:answer', { fromUserId: socket.userId, answer });
     }
   });
 
-  socket.on('call:ice-candidate', ({ toUserId, candidate }) => {
+  socket.on('call:ice-candidate', (data) => {
+    const { toUserId, candidate } = data || {};
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('call:ice-candidate', { fromUserId: socket.userId, candidate });
     }
   });
 
-  socket.on('call:end', ({ toUserId }) => {
+  socket.on('call:end', (data) => {
+    const toUserId = data?.toUserId;
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('call:end', { fromUserId: socket.userId });
     }
   });
 
-  socket.on('call:reject', ({ toUserId }) => {
+  socket.on('call:reject', (data) => {
+    const toUserId = data?.toUserId;
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('call:reject', { fromUserId: socket.userId });
@@ -132,7 +165,9 @@ io.on('connection', (socket) => {
   });
 
   // Friend request notifications
-  socket.on('friend:request:send', ({ toUserId }) => {
+  socket.on('friend:request:send', (data) => {
+    const toUserId = data?.toUserId;
+    if (!toUserId || !socket.userId) return;
     const recipientSocket = onlineUsers.get(toUserId);
     if (recipientSocket) {
       io.to(recipientSocket).emit('friend:request:incoming', { fromUserId: socket.userId });

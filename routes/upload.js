@@ -29,11 +29,11 @@ const upload = multer({
   }
 });
 
-router.post('/', auth, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'لم يتم رفع ملف' });
+router.post('/', auth, upload.single('file'), (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const { toUserId } = req.body;
-  if (!toUserId) return res.status(400).json({ error: 'toUserId مطلوب' });
+  if (!toUserId) return res.status(400).json({ error: 'toUserId is required' });
 
   const imageExts = /\.(jpg|jpeg|png|gif|webp)$/i;
   const type = imageExts.test(req.file.originalname) ? 'image' : 'file';
@@ -41,12 +41,19 @@ router.post('/', auth, upload.single('file'), (req, res) => {
   const msgId = uuidv4();
   const now = new Date().toISOString();
 
-  db.prepare(`
-    INSERT INTO messages (id, from_user_id, to_user_id, content, type, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(msgId, req.user.id, toUserId, url, type, now);
+  try {
+    db.prepare(`
+      INSERT INTO messages (id, from_user_id, to_user_id, content, type, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(msgId, req.user.id, toUserId, url, type, now);
+  } catch (err) {
+    // Clean up the uploaded file if DB insert fails
+    const filePath = path.join(uploadDir, req.file.filename);
+    fs.unlink(filePath, () => {});
+    return next(err);
+  }
 
-  // Emit to recipient via socket (handled in server.js via global io)
+  // Emit to recipient via socket
   if (global.io) {
     const { onlineUsers } = global;
     const recipientSocket = onlineUsers?.get(toUserId);
