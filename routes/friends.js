@@ -5,100 +5,133 @@ const db = require('../models/database');
 const auth = require('../middleware/auth');
 
 // Send friend request
-router.post('/request', auth, (req, res) => {
-  const { toUsername } = req.body;
-  const fromUserId = req.user.id;
+router.post('/request', auth, (req, res, next) => {
+  try {
+    const { toUsername } = req.body;
+    if (!toUsername) return res.status(400).json({ error: 'toUsername is required' });
 
-  const toUser = db.prepare('SELECT id FROM users WHERE username = ?').get(toUsername.toLowerCase());
-  if (!toUser) return res.status(404).json({ error: 'User not found' });
-  if (toUser.id === fromUserId) return res.status(400).json({ error: 'Cannot add yourself' });
+    const fromUserId = req.user.id;
 
-  // Check if already friends
-  const alreadyFriends = db.prepare(`
-    SELECT id FROM friendships
-    WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)
-  `).get(fromUserId, toUser.id, toUser.id, fromUserId);
-  if (alreadyFriends) return res.status(409).json({ error: 'Already friends' });
+    const toUser = db.prepare('SELECT id FROM users WHERE username = ?').get(toUsername.toLowerCase());
+    if (!toUser) return res.status(404).json({ error: 'User not found' });
+    if (toUser.id === fromUserId) return res.status(400).json({ error: 'Cannot add yourself' });
 
-  // Check existing request
-  const existing = db.prepare(`
-    SELECT id, status FROM friend_requests
-    WHERE (from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)
-  `).get(fromUserId, toUser.id, toUser.id, fromUserId);
+    // Check if already friends
+    const alreadyFriends = db.prepare(`
+      SELECT id FROM friendships
+      WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)
+    `).get(fromUserId, toUser.id, toUser.id, fromUserId);
+    if (alreadyFriends) return res.status(409).json({ error: 'Already friends' });
 
-  if (existing) return res.status(409).json({ error: 'Request already exists' });
+    // Check existing request
+    const existing = db.prepare(`
+      SELECT id, status FROM friend_requests
+      WHERE (from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)
+    `).get(fromUserId, toUser.id, toUser.id, fromUserId);
 
-  const id = uuidv4();
-  db.prepare(`
-    INSERT INTO friend_requests (id, from_user_id, to_user_id, status, created_at)
-    VALUES (?, ?, ?, 'pending', ?)
-  `).run(id, fromUserId, toUser.id, new Date().toISOString());
+    if (existing) return res.status(409).json({ error: 'Request already exists' });
 
-  res.json({ success: true, requestId: id, toUserId: toUser.id });
+    const id = uuidv4();
+    db.prepare(`
+      INSERT INTO friend_requests (id, from_user_id, to_user_id, status, created_at)
+      VALUES (?, ?, ?, 'pending', ?)
+    `).run(id, fromUserId, toUser.id, new Date().toISOString());
+
+    res.json({ success: true, requestId: id, toUserId: toUser.id });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Accept friend request
-router.post('/accept/:requestId', auth, (req, res) => {
-  const request = db.prepare(
-    'SELECT * FROM friend_requests WHERE id = ? AND to_user_id = ? AND status = ?'
-  ).get(req.params.requestId, req.user.id, 'pending');
+router.post('/accept/:requestId', auth, (req, res, next) => {
+  try {
+    const request = db.prepare(
+      'SELECT * FROM friend_requests WHERE id = ? AND to_user_id = ? AND status = ?'
+    ).get(req.params.requestId, req.user.id, 'pending');
 
-  if (!request) return res.status(404).json({ error: 'Request not found' });
+    if (!request) return res.status(404).json({ error: 'Request not found' });
 
-  db.prepare('UPDATE friend_requests SET status = ? WHERE id = ?').run('accepted', request.id);
+    const acceptRequest = db.transaction(() => {
+      db.prepare('UPDATE friend_requests SET status = ? WHERE id = ?').run('accepted', request.id);
 
-  const friendshipId = uuidv4();
-  db.prepare(`
-    INSERT INTO friendships (id, user1_id, user2_id, created_at)
-    VALUES (?, ?, ?, ?)
-  `).run(friendshipId, request.from_user_id, request.to_user_id, new Date().toISOString());
+      const friendshipId = uuidv4();
+      db.prepare(`
+        INSERT INTO friendships (id, user1_id, user2_id, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(friendshipId, request.from_user_id, request.to_user_id, new Date().toISOString());
+    });
 
-  res.json({ success: true });
+    acceptRequest();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Decline/cancel request
-router.post('/decline/:requestId', auth, (req, res) => {
-  db.prepare(
-    'UPDATE friend_requests SET status = ? WHERE id = ? AND (to_user_id = ? OR from_user_id = ?)'
-  ).run('declined', req.params.requestId, req.user.id, req.user.id);
-  res.json({ success: true });
+router.post('/decline/:requestId', auth, (req, res, next) => {
+  try {
+    const result = db.prepare(
+      'UPDATE friend_requests SET status = ? WHERE id = ? AND (to_user_id = ? OR from_user_id = ?) AND status = ?'
+    ).run('declined', req.params.requestId, req.user.id, req.user.id, 'pending');
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Request not found or already processed' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Get my friends list
-router.get('/', auth, (req, res) => {
-  const friends = db.prepare(`
-    SELECT u.id, u.username, u.display_name, u.avatar_color
-    FROM friendships f
-    JOIN users u ON (
-      CASE WHEN f.user1_id = ? THEN f.user2_id ELSE f.user1_id END = u.id
-    )
-    WHERE f.user1_id = ? OR f.user2_id = ?
-  `).all(req.user.id, req.user.id, req.user.id);
-  res.json(friends);
+router.get('/', auth, (req, res, next) => {
+  try {
+    const friends = db.prepare(`
+      SELECT u.id, u.username, u.display_name, u.avatar_color
+      FROM friendships f
+      JOIN users u ON (
+        CASE WHEN f.user1_id = ? THEN f.user2_id ELSE f.user1_id END = u.id
+      )
+      WHERE f.user1_id = ? OR f.user2_id = ?
+    `).all(req.user.id, req.user.id, req.user.id);
+    res.json(friends);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Get pending requests (incoming)
-router.get('/requests/incoming', auth, (req, res) => {
-  const requests = db.prepare(`
-    SELECT fr.id, fr.created_at, u.id as from_user_id, u.username, u.display_name, u.avatar_color
-    FROM friend_requests fr
-    JOIN users u ON fr.from_user_id = u.id
-    WHERE fr.to_user_id = ? AND fr.status = 'pending'
-    ORDER BY fr.created_at DESC
-  `).all(req.user.id);
-  res.json(requests);
+router.get('/requests/incoming', auth, (req, res, next) => {
+  try {
+    const requests = db.prepare(`
+      SELECT fr.id, fr.created_at, u.id as from_user_id, u.username, u.display_name, u.avatar_color
+      FROM friend_requests fr
+      JOIN users u ON fr.from_user_id = u.id
+      WHERE fr.to_user_id = ? AND fr.status = 'pending'
+      ORDER BY fr.created_at DESC
+    `).all(req.user.id);
+    res.json(requests);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Get outgoing pending requests
-router.get('/requests/outgoing', auth, (req, res) => {
-  const requests = db.prepare(`
-    SELECT fr.id, fr.created_at, u.id as to_user_id, u.username, u.display_name
-    FROM friend_requests fr
-    JOIN users u ON fr.to_user_id = u.id
-    WHERE fr.from_user_id = ? AND fr.status = 'pending'
-    ORDER BY fr.created_at DESC
-  `).all(req.user.id);
-  res.json(requests);
+router.get('/requests/outgoing', auth, (req, res, next) => {
+  try {
+    const requests = db.prepare(`
+      SELECT fr.id, fr.created_at, u.id as to_user_id, u.username, u.display_name
+      FROM friend_requests fr
+      JOIN users u ON fr.to_user_id = u.id
+      WHERE fr.from_user_id = ? AND fr.status = 'pending'
+      ORDER BY fr.created_at DESC
+    `).all(req.user.id);
+    res.json(requests);
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;
