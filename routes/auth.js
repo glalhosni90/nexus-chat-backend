@@ -4,8 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../models/database');
-
-const SECRET = process.env.JWT_SECRET || 'nexus_secret_change_in_production';
+const { getJwtSecret } = require('../middleware/auth');
 
 // Register
 router.post('/register', async (req, res) => {
@@ -15,6 +14,9 @@ router.post('/register', async (req, res) => {
 
   if (username.length < 3 || username.length > 20)
     return res.status(400).json({ error: 'Username must be 3-20 characters' });
+
+  if (password.length < 8)
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
 
   if (!/^[a-zA-Z0-9_]+$/.test(username))
     return res.status(400).json({ error: 'Username can only contain letters, numbers, underscore' });
@@ -33,7 +35,7 @@ router.post('/register', async (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(id, username.toLowerCase(), displayName, passwordHash, avatarColor, now);
 
-  const token = jwt.sign({ id, username: username.toLowerCase() }, SECRET, { expiresIn: '30d' });
+  const token = jwt.sign({ id, username: username.toLowerCase() }, getJwtSecret(), { expiresIn: '7d' });
   res.json({ token, user: { id, username: username.toLowerCase(), displayName, avatarColor } });
 });
 
@@ -49,7 +51,7 @@ router.post('/login', async (req, res) => {
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-  const token = jwt.sign({ id: user.id, username: user.username }, SECRET, { expiresIn: '30d' });
+  const token = jwt.sign({ id: user.id, username: user.username }, getJwtSecret(), { expiresIn: '7d' });
   res.json({
     token,
     user: { id: user.id, username: user.username, displayName: user.display_name, avatarColor: user.avatar_color }

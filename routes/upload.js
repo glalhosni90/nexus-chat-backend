@@ -23,9 +23,12 @@ const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp|pdf|doc|docx|zip|txt|mp3|mp4/;
+    const allowedExts = /jpeg|jpg|png|gif|webp|pdf|doc|docx|zip|txt|mp3|mp4/;
+    const allowedMimes = /image\/(jpeg|png|gif|webp)|application\/(pdf|msword|vnd\.openxmlformats|zip|octet-stream)|text\/plain|audio\/mpeg|video\/mp4/;
     const ext = path.extname(file.originalname).toLowerCase().replace('.', '');
-    cb(null, allowed.test(ext));
+    const mimeValid = allowedMimes.test(file.mimetype);
+    const extValid = allowedExts.test(ext);
+    cb(null, extValid && mimeValid);
   }
 });
 

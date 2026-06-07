@@ -7,7 +7,7 @@ const auth = require('../middleware/auth');
 router.get('/:friendId', auth, (req, res) => {
   const { friendId } = req.params;
   const myId = req.user.id;
-  const limit = parseInt(req.query.limit) || 50;
+  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
   const before = req.query.before;
 
   let query = `
