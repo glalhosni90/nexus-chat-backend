@@ -13,8 +13,8 @@ router.get('/:friendId', auth, (req, res) => {
   let query = `
     SELECT m.id, m.from_user_id, m.to_user_id, m.content, m.type, m.is_read, m.created_at
     FROM messages m
-    WHERE (m.from_user_id = ? AND m.to_user_id = ?)
-       OR (m.from_user_id = ? AND m.to_user_id = ?)
+    WHERE ((m.from_user_id = ? AND m.to_user_id = ?)
+       OR (m.from_user_id = ? AND m.to_user_id = ?))
   `;
   const params = [myId, friendId, friendId, myId];
 
